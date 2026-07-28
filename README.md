@@ -1,4 +1,4 @@
-# clawker-test-bundle
+# clawker-bundle-example
 
 A working example [clawker](https://github.com/schmitthub/clawker) bundle —
 fork this repo to build your own. It ships four harnesses and eight
@@ -49,7 +49,7 @@ Declare and build:
 
 ```yaml
 bundles:
-  - url: https://github.com/schmitthub/clawker-test-bundle.git
+  - url: https://github.com/schmitthub/clawker-bundle-example.git
     ref: v2026.7.1
 ```
 
