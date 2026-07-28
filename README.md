@@ -50,7 +50,7 @@ Declare and build:
 ```yaml
 bundles:
   - url: https://github.com/schmitthub/clawker-test-bundle.git
-    ref: v0.1.2
+    ref: v2026.7.1
 ```
 
 ```bash
