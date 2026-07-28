@@ -48,6 +48,12 @@ RUN set -eu; \
       ln -s /home/linuxbrew/.linuxbrew/Homebrew/Library /home/linuxbrew/.linuxbrew/Library; \
     chmod -R g+rwx /home/linuxbrew
 
+# Mount anchor for the `brew` volume, and nothing else. Volume paths are
+# container-home-relative; brew's prefix is not. Docker resolves this symlink
+# at mount time, so the volume lands on /home/linuxbrew/.linuxbrew and runtime
+# `brew install` survives a container recreate. Nothing reads this path.
+RUN ln -s /home/linuxbrew/.linuxbrew /home/${USERNAME}/.linuxbrew
+
 # OpenClaw version. Build-only ARG, declared here rather than at the top
 # of the block because BuildKit invalidates the cache at an ARG's
 # DECLARATION line, not at first use — hoisting it above the Homebrew

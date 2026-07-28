@@ -40,11 +40,12 @@ stacks:
 #             container.
 #   cache   — ~/.cache: Homebrew's download cache, node compile cache,
 #             and the Playwright browser bundle when it is installed.
-#
-# NOTE: brew itself installs into /home/linuxbrew/.linuxbrew, which is
-# OUTSIDE the container home and therefore not expressible here (volume
-# paths are container-home-relative). Formulae installed at runtime do
-# not survive a container recreate. Bake what you need at build time.
+#   brew    — brew's prefix. It lives at /home/linuxbrew/.linuxbrew, outside
+#             the container home, so the template symlinks a home-relative
+#             path to it purely so this entry can name something; Docker
+#             resolves the symlink and mounts the volume on the real prefix.
+#             Without it, every formula installed at runtime is lost on
+#             container recreate.
 volumes:
   - name: config
     path: .openclaw
@@ -54,6 +55,8 @@ volumes:
     path: .local
   - name: cache
     path: .cache
+  - name: brew
+    path: .linuxbrew
 
 # No staging: OpenClaw state is server-side, not host dotfiles. There is
 # nothing on a developer machine to carry in, and credentials should never
