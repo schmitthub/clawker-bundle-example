@@ -54,53 +54,6 @@ RUN set -eu; \
 # `brew install` survives a container recreate. Nothing reads this path.
 RUN ln -s /home/linuxbrew/.linuxbrew /home/${USERNAME}/.linuxbrew
 
-# OpenClaw version. Build-only ARG, declared here rather than at the top
-# of the block because BuildKit invalidates the cache at an ARG's
-# DECLARATION line, not at first use — hoisting it above the Homebrew
-# layer would re-run that ~500MB install on every OpenClaw release.
-# Default resolves against the npm registry at template-render time.
-# Override: clawker build --build-arg OPENCLAW_VERSION=<version>
-ARG OPENCLAW_VERSION={{.HarnessVersion}}
-
-# Installed ROOT-GLOBAL, against the node stack's /usr/local install, so
-# the binary lands on /usr/local/bin/openclaw — the same location upstream
-# symlinks it to. This is deliberate and differs from the other harnesses
-# in this bundle: the CMD here is a daemon that clawkerd execs directly
-# via exec.LookPath against the image ENV PATH. No shell runs, so .zshenv
-# never loads and nvm's user-owned prefix is never on PATH. A user-scope
-# npm install would resolve for `clawker exec` (zsh) but NOT for the CMD,
-# and a PATH miss does not fail loudly — clawkerd reroutes argv through
-# the image's default CMD and only logs a warning.
-#
-# NODE_OPTIONS caps heap so the install does not OOM (exit 137) on small
-# hosts; SHARP_IGNORE_GLOBAL_LIBVIPS keeps the image's libvips out of the
-# native build.
-#
-# npm 11.16+ blocks install-time lifecycle scripts by default and only WARNS
-# when it skips them, so a plain `npm install -g` silently drops OpenClaw's
-# postinstall (dist hygiene, plugin-registry migration, a baileys patch) —
-# the same script upstream's own Dockerfile runs explicitly. The allowlist
-# names exactly the packages that need scripts, and --strict-allow-scripts
-# turns the policy from a warning into a hard failure: if a future OpenClaw
-# release pulls in another script-bearing dependency, this build FAILS and
-# names it instead of quietly skipping it. Widening the list is then a
-# deliberate one-line decision, which is the point.
-{{- if .BuildKitEnabled}}
-RUN --mount=type=cache,target=/root/.npm \
-    SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
-    npm install -g --no-fund --no-audit \
-      --strict-allow-scripts \
-      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
-      "openclaw@${OPENCLAW_VERSION}" && \
-    command -v openclaw
-{{- else}}
-RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
-    npm install -g --no-fund --no-audit \
-      --strict-allow-scripts \
-      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
-      "openclaw@${OPENCLAW_VERSION}" && \
-    command -v openclaw
-{{- end}}
 {{- end}}
 
 {{define "user_after_stacks" -}}
@@ -117,10 +70,13 @@ ENV OPENCLAW_WORKSPACE_DIR=/home/${USERNAME}/.openclaw/workspace
 ENV OPENCLAW_GATEWAY_PORT=18789
 
 # Gateway bind is deliberately NOT set. OpenClaw detects the container and
-# defaults to bind=auto (0.0.0.0) so a published port is reachable from
-# the host; forcing loopback here would make `-p 127.0.0.1:18789:18789`
-# silently dead. Non-loopback binds REQUIRE auth, so supply a token at
-# runtime (agent.env / agent.from_env), never baked into the image:
+# defaults to bind=auto (0.0.0.0) so a published port is reachable from the
+# host; forcing loopback here would make `-p 127.0.0.1:18789:18789` silently
+# dead. OPENCLAW_GATEWAY_BIND is not the lever it appears to be — it is a
+# deployment-template variable in upstream's compose and docs, absent from
+# the published package; the runtime reads gateway.bind from config only.
+# Non-loopback binds REQUIRE auth, so supply a token at runtime
+# (agent.env / agent.from_env), never baked into the image:
 #   OPENCLAW_GATEWAY_TOKEN=<secret>
 
 # clawkerd is PID 1 and owns the process lifecycle, so OpenClaw must not
@@ -146,7 +102,12 @@ ENV HOMEBREW_REPOSITORY=/home/linuxbrew/.linuxbrew/Homebrew
 
 # Exec-form CMD resolves via the image ENV PATH only — rc files never
 # apply — and runtime-installed skill binaries land in these prefixes.
-ENV PATH=${PNPM_HOME}:/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:${PATH}
+# ~/.nvm/current is the stable symlink the install block below creates into
+# nvm's versioned prefix: it puts the user-owned node, npm, and openclaw in
+# front of the node stack's /usr/local floor for the CMD, the healthcheck,
+# and every subprocess the gateway spawns (plugin installs run npm — the
+# user-owned one keeps those writes out of root-owned prefixes).
+ENV PATH=${PNPM_HOME}:/home/${USERNAME}/.nvm/current/bin:/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:${PATH}
 
 # OpenClaw's doctor checks that its state dirs are owner-only; bind mounts
 # and volume defaults land at 0755. The engine's volume block has already
@@ -163,6 +124,50 @@ RUN mkdir -p ${OPENCLAW_WORKSPACE_DIR} ${PNPM_HOME} \
 RUN if [ -d /home/linuxbrew/.linuxbrew/Homebrew ]; then \
       git config --global --add safe.directory /home/linuxbrew/.linuxbrew/Homebrew; \
     fi
+
+{{- end}}
+
+{{define "user_after_shell_switch" -}}
+# OpenClaw version. Build-only ARG declared directly above its only
+# consumer: BuildKit invalidates the cache at an ARG's DECLARATION line,
+# so placing it here scopes an OpenClaw release bump to this layer alone.
+# Default resolves against the npm registry at template-render time.
+# Override: clawker build --build-arg OPENCLAW_VERSION=<version>
+ARG OPENCLAW_VERSION={{.HarnessVersion}}
+
+# Installed as the container USER through nvm, matching the other harnesses
+# in this bundle — nothing npm-ish runs as root, so no root-owned droppings
+# can land in the user's home (a root npm here bricked runtime plugin
+# installs with EACCES on ~/.npm; the base image sets HOME=/home/<user> for
+# every build step, root ones included). This block runs under zsh, which
+# sources .zshenv, so npm resolves to nvm's user-owned prefix.
+#
+# The exec-form CMD never runs a shell, so nvm's rc-file magic is invisible
+# to it; the `current` symlink gives the versioned nvm prefix a static path
+# that ENV PATH (user_after_stacks) puts in front of /usr/local. node, npm,
+# and openclaw all resolve user-owned from there.
+#
+# NODE_OPTIONS caps heap so the install does not OOM (exit 137) on small
+# hosts; SHARP_IGNORE_GLOBAL_LIBVIPS keeps the image's libvips out of the
+# native build.
+#
+# npm 11.16+ blocks install-time lifecycle scripts by default and only WARNS
+# when it skips them, so a plain `npm install -g` silently drops OpenClaw's
+# postinstall (dist hygiene, plugin-registry migration, a baileys patch) —
+# the same script upstream's own Dockerfile runs explicitly. The allowlist
+# names exactly the packages that need scripts, and --strict-allow-scripts
+# turns the policy from a warning into a hard failure: if a future OpenClaw
+# release pulls in another script-bearing dependency, this build FAILS and
+# names it instead of quietly skipping it. Widening the list is then a
+# deliberate one-line decision, which is the point.
+RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
+    npm install -g --no-fund --no-audit \
+      --strict-allow-scripts \
+      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
+      "openclaw@${OPENCLAW_VERSION}" && \
+    ln -sfn "$(dirname "$(dirname "$(command -v node)")")" \
+      /home/${USERNAME}/.nvm/current && \
+    /home/${USERNAME}/.nvm/current/bin/openclaw --version
 {{- end}}
 
 {{define "root_before_entrypoint" -}}
@@ -175,8 +180,22 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 {{- end}}
 
 {{define "cmd" -}}
-# Bare `gateway` is an alias for `gateway run`. Port and bind come from
-# the ENV/config above rather than flags so they stay overridable without
-# rebuilding the image.
+# Bare `gateway` is an alias for `gateway run`. Port and bind come from the
+# ENV/config above rather than flags so they stay overridable without
+# rebuilding the image — a flag here would also win over any gateway.bind
+# the user later sets, which is the opposite of what a generic image wants.
+#
+# The gateway's start guard requires gateway.mode=local in an existing
+# config and exits otherwise ("Missing config. Run `openclaw setup`").
+# A fresh named volume has no config, so a bare unonboarded run dies on
+# first boot — DELIBERATELY. Onboarding is a deployment concern:
+# `agent.post_init` runs `openclaw onboard --non-interactive ...` before
+# this CMD ever starts, satisfying the guard the intended way. A user who
+# instead wants an unonboarded gateway (Control-UI-first setup) opts in at
+# runtime, where the flag stays their call, not the image's:
+#   clawker run ... @:openclaw openclaw gateway --allow-unconfigured
+# Baking that flag here would permanently suppress the guard — which also
+# protects an ONBOARDED deployment against clobbered config — for every
+# container built from this image.
 CMD ["openclaw", "gateway"]
 {{- end}}
