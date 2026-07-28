@@ -82,11 +82,15 @@ RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
 {{- end}}
 
 {{define "user_after_stacks" -}}
-# State locations. These match the defaults (~/.openclaw) and therefore
-# the declared volumes; set explicitly so the mapping is legible rather
-# than implied. OpenClaw's docs reference both OPENCLAW_CONFIG_DIR and
-# $OPENCLAW_STATE_DIR for the same tree — both resolve to this path.
-ENV OPENCLAW_CONFIG_DIR=/home/${USERNAME}/.openclaw
+# State locations. These match the defaults and therefore the declared
+# volumes; set explicitly so the mapping is legible rather than implied.
+#
+# OPENCLAW_STATE_DIR is the variable the runtime reads
+# (`env.OPENCLAW_STATE_DIR || path.join(process.env.HOME, ".openclaw")`).
+# OPENCLAW_CONFIG_DIR is NOT set on purpose: it appears only in upstream's
+# docs and compose files, where it interpolates the HOST side of the bind
+# mount. The application never reads it, so setting it here would be inert.
+ENV OPENCLAW_STATE_DIR=/home/${USERNAME}/.openclaw
 ENV OPENCLAW_WORKSPACE_DIR=/home/${USERNAME}/.openclaw/workspace
 ENV OPENCLAW_GATEWAY_PORT=18789
 
@@ -97,18 +101,20 @@ ENV OPENCLAW_GATEWAY_PORT=18789
 # runtime (agent.env / agent.from_env), never baked into the image:
 #   OPENCLAW_GATEWAY_TOKEN=<secret>
 
-# clawkerd is PID 1 and owns the process lifecycle: declare the external
-# supervisor and disable OpenClaw's own respawn so the two do not fight.
-ENV OPENCLAW_SUPERVISOR_MODE=external
+# clawkerd is PID 1 and owns the process lifecycle, so OpenClaw must not
+# respawn itself. OPENCLAW_SUPERVISOR_MODE, which the CLI docs describe for
+# exactly this purpose, appears nowhere in the published package — setting
+# it would be inert, so the respawn switch carries this on its own.
 ENV OPENCLAW_NO_RESPAWN=1
 ENV NODE_ENV=production
 
-# pnpm is OpenClaw's preferred package manager for runtime skill installs
-# (skills.install.nodeManager). Point its home at the persisted .local
-# volume so installed skill dependencies survive container recreation —
-# its content-addressed store also dedups across installs, which a flat
-# npm global tree would not.
-ENV OPENCLAW_PREFER_PNPM=1
+# pnpm is OpenClaw's preferred package manager for runtime skill installs,
+# selected by config (skills.install.nodeManager) rather than by env —
+# OPENCLAW_PREFER_PNPM is a build-time flag for upstream's own image build
+# and is not read by the published package. Point pnpm's home at the
+# persisted .local volume so installed skill dependencies survive container
+# recreation; its content-addressed store also dedups across installs,
+# which a flat npm global tree would not.
 ENV PNPM_HOME=/home/${USERNAME}/.local/share/pnpm
 ENV NODE_COMPILE_CACHE=/home/${USERNAME}/.cache/node-compile-cache
 
