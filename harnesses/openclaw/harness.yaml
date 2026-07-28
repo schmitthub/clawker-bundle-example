@@ -62,43 +62,52 @@ volumes:
 # nothing on a developer machine to carry in, and credentials should never
 # travel — onboard inside the container.
 
-# Runtime floor. Build-time fetches (npm install, the brew installer) run
-# on the host daemon outside the agent network namespace and need no rule
-# here; everything below is reached by the RUNNING gateway.
-#
-# Channel domains are deliberately ABSENT. Which channels a deployment
-# uses is a per-user choice, and the convention in this bundle is to widen
-# only from observed blocked traffic, never preemptively. Expect to add
-# rules for Discord/Telegram/etc. after watching what the gateway actually
-# reaches for.
+# Floor = the package managers the harness's own machinery uses, nothing
+# else. OpenClaw is a self-hosted gateway with no destination it cannot
+# FUNCTION without (unlike claude, which is dead without api.anthropic.com)
+# — but its baked-in install machinery reaches package registries on its
+# own: startup migrations npm-install missing bundled plugins before any
+# user choice, and the Control UI's skill installs shell out to npm/pnpm,
+# uv/pip, and the brew this image bakes. Model providers, channels, and
+# search follow from per-deployment choices and belong in the deployment
+# repo's clawker config (`security.firewall`), widened from observed
+# blocks. (Build-time fetches run on the host daemon outside the agent
+# network namespace and never needed rules here.)
 egress:
-  # Model providers. Trimmed to the set OpenClaw's own onboarding offers
-  # as first-class auth choices; add others as needed.
-  - dst: api.anthropic.com
-  - dst: api.openai.com
-  - dst: generativelanguage.googleapis.com
-  - dst: openrouter.ai
-  - dst: api.x.ai
-
-  # OpenClaw's plugin/skill registry.
-  - dst: clawhub.com
-
-  # Web search — the search provider offered during onboarding.
-  - dst: api.search.brave.com
-
-  # Skill dependency installs, performed at RUNTIME from the Control UI
-  # (skills.install.nodeManager, and uv/pip for python-backed skills).
-  # Without these the "install" button fails with an unresolvable host and
-  # no explanation.
+  # node — plugin repair + skill installs (npm/pnpm)
   - dst: registry.npmjs.org
+  # python — uv/pip-backed skills
   - dst: pypi.org
   - dst: files.pythonhosted.org
-
-  # Homebrew, also a runtime path: OpenClaw shells out to `brew` for
-  # brew-backed skills and to install `uv`. Bottles are served from ghcr.io;
-  # formulae metadata from formulae.brew.sh; taps and some sources from
-  # GitHub.
+  # homebrew — formulae metadata + bottles for brew-backed skills
   - dst: formulae.brew.sh
+  # Bottles come from GitHub Container Registry. Traced live (jq 1.8.2):
+  # ghcr.io itself serves only the API — /token (anonymous pull auth) and
+  # /v2/homebrew/core/<f>/manifests/* (JSON) — while the blob GET answers
+  # 307 to a storage bucket, which is where the bytes actually come from:
+  #   ghcr.io/v2/homebrew/core/jq/blobs/sha256:...
+  #   -> 307 pkg-containers.githubusercontent.com/ghcrblobs16/blobs/...?sp=r&hmac=...
+  # So two hosts, each scoped to what it does in that chain:
+  #
+  # ghcr.io is path-scoped to the homebrew namespace, read-only verbs — a
+  # bare allow would open all of GHCR, where forwarded GitHub credentials
+  # could push blobs to an attacker-readable package (an exfil channel,
+  # not a theoretical). An allow path with no path_default denies every
+  # other path on the host.
   - dst: ghcr.io
-  - dst: github.com
-  - dst: .githubusercontent.com
+    path_rules:
+      - path: ~/v2/homebrew/.*
+        action: allow
+        methods: [GET, HEAD]
+      - path: ~/token
+        action: allow
+        methods: [GET]
+  # The bucket host, exact — NOT the .githubusercontent.com wildcard
+  # (raw. and friends stay out). Its URLs are HMAC-signed, short-lived,
+  # and read-only (sp=r), mintable only through the ghcr API scoped
+  # above, so it adds no push surface.
+  - dst: pkg-containers.githubusercontent.com
+    path_rules:
+      - path: ~/ghcrblobs.*
+        action: allow
+        methods: [GET, HEAD]
