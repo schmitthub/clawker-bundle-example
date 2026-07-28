@@ -75,14 +75,30 @@ ARG OPENCLAW_VERSION={{.HarnessVersion}}
 # NODE_OPTIONS caps heap so the install does not OOM (exit 137) on small
 # hosts; SHARP_IGNORE_GLOBAL_LIBVIPS keeps the image's libvips out of the
 # native build.
+#
+# npm 11.16+ blocks install-time lifecycle scripts by default and only WARNS
+# when it skips them, so a plain `npm install -g` silently drops OpenClaw's
+# postinstall (dist hygiene, plugin-registry migration, a baileys patch) —
+# the same script upstream's own Dockerfile runs explicitly. The allowlist
+# names exactly the packages that need scripts, and --strict-allow-scripts
+# turns the policy from a warning into a hard failure: if a future OpenClaw
+# release pulls in another script-bearing dependency, this build FAILS and
+# names it instead of quietly skipping it. Widening the list is then a
+# deliberate one-line decision, which is the point.
 {{- if .BuildKitEnabled}}
 RUN --mount=type=cache,target=/root/.npm \
     SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
-    npm install -g --no-fund --no-audit "openclaw@${OPENCLAW_VERSION}" && \
+    npm install -g --no-fund --no-audit \
+      --strict-allow-scripts \
+      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
+      "openclaw@${OPENCLAW_VERSION}" && \
     command -v openclaw
 {{- else}}
 RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
-    npm install -g --no-fund --no-audit "openclaw@${OPENCLAW_VERSION}" && \
+    npm install -g --no-fund --no-audit \
+      --strict-allow-scripts \
+      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
+      "openclaw@${OPENCLAW_VERSION}" && \
     command -v openclaw
 {{- end}}
 {{- end}}
