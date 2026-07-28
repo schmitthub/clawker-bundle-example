@@ -1,0 +1,101 @@
+# OpenClaw harness — openclaw.ai gateway, installed from npm.
+#
+# Unlike the other harnesses in this bundle, OpenClaw is not an interactive
+# CLI: it is a long-lived gateway daemon that bridges chat platforms
+# (Discord, Telegram, Slack, ...) to coding agents. The CMD never exits;
+# clawkerd supervises it as PID 1 and the Control UI is reached by
+# publishing the gateway port:
+#
+#   clawker run --detach -p 127.0.0.1:18789:18789 @:openclaw
+#
+# Upstream builds its own image from source in-repo (multi-stage, prunes
+# dev deps). That shape is not expressible as a harness fragment — every
+# block slot renders into the single `final` stage — so this harness
+# installs the published npm package instead. The npm tarball ships the
+# built `dist/` with every channel compiled in, plus an
+# `npm-shrinkwrap.json`: the one lockfile npm publishes AND honors on
+# install, pinning the exact dependency tree upstream tested. pnpm and
+# yarn both ignore it, which is why the install below is npm.
+version:
+  resolver: npm
+  package: openclaw
+
+# OpenClaw is npm-distributed and runs on node. The node stack provisions
+# the root-global LTS install on /usr/local (which the build-time
+# `npm install -g` below consumes) plus user-scope nvm.
+stacks:
+  - node
+
+# Persisted dirs. OpenClaw's docs are explicit that "anything under
+# ~/.openclaw may contain secrets or private data" — auth profiles and MCP
+# OAuth tokens live in SQLite there, not just in named credential files.
+#
+#   config  — ~/.openclaw: openclaw.json, agents/<id>/agent/*.sqlite,
+#             credentials/, workspace/
+#   secrets — ~/.config/openclaw: auth-profile secret dir
+#   local   — ~/.local: where runtime skill installs land (pnpm global,
+#             pip/uv --user, and their bins). OpenClaw installs skill
+#             dependencies on demand from the Control UI, so this must
+#             survive container recreation or every skill dies with the
+#             container.
+#   cache   — ~/.cache: Homebrew's download cache, node compile cache,
+#             and the Playwright browser bundle when it is installed.
+#
+# NOTE: brew itself installs into /home/linuxbrew/.linuxbrew, which is
+# OUTSIDE the container home and therefore not expressible here (volume
+# paths are container-home-relative). Formulae installed at runtime do
+# not survive a container recreate. Bake what you need at build time.
+volumes:
+  - name: config
+    path: .openclaw
+  - name: secrets
+    path: .config/openclaw
+  - name: local
+    path: .local
+  - name: cache
+    path: .cache
+
+# No staging: OpenClaw state is server-side, not host dotfiles. There is
+# nothing on a developer machine to carry in, and credentials should never
+# travel — onboard inside the container.
+
+# Runtime floor. Build-time fetches (npm install, the brew installer) run
+# on the host daemon outside the agent network namespace and need no rule
+# here; everything below is reached by the RUNNING gateway.
+#
+# Channel domains are deliberately ABSENT. Which channels a deployment
+# uses is a per-user choice, and the convention in this bundle is to widen
+# only from observed blocked traffic, never preemptively. Expect to add
+# rules for Discord/Telegram/etc. after watching what the gateway actually
+# reaches for.
+egress:
+  # Model providers. Trimmed to the set OpenClaw's own onboarding offers
+  # as first-class auth choices; add others as needed.
+  - dst: api.anthropic.com
+  - dst: api.openai.com
+  - dst: generativelanguage.googleapis.com
+  - dst: openrouter.ai
+  - dst: api.x.ai
+
+  # OpenClaw's plugin/skill registry.
+  - dst: clawhub.com
+
+  # Web search — the search provider offered during onboarding.
+  - dst: api.search.brave.com
+
+  # Skill dependency installs, performed at RUNTIME from the Control UI
+  # (skills.install.nodeManager, and uv/pip for python-backed skills).
+  # Without these the "install" button fails with an unresolvable host and
+  # no explanation.
+  - dst: registry.npmjs.org
+  - dst: pypi.org
+  - dst: files.pythonhosted.org
+
+  # Homebrew, also a runtime path: OpenClaw shells out to `brew` for
+  # brew-backed skills and to install `uv`. Bottles are served from ghcr.io;
+  # formulae metadata from formulae.brew.sh; taps and some sources from
+  # GitHub.
+  - dst: formulae.brew.sh
+  - dst: ghcr.io
+  - dst: github.com
+  - dst: .githubusercontent.com
