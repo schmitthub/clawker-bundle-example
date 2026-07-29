@@ -1,0 +1,201 @@
+{{/*
+  OpenClaw harness — fills the master Dockerfile.tmpl block slots.
+  Each define's body is emitted verbatim at the block's position in the
+  master; the master owns ordering and cache architecture.
+*/}}
+
+{{define "root_after_stacks" -}}
+# Pre-create ~/.config owned by the container user, BEFORE the engine's
+# harness-volume mkdir runs. That block does `mkdir -p <dir> && chown -R
+# <dir>` per declared volume path, so for `.config/openclaw` it chowns the
+# leaf but leaves the `.config` PARENT root-owned. OpenClaw hit exactly
+# this (upstream issue #85968) and pre-creates the parent for the same
+# reason. `mkdir -p` on an existing dir is a no-op, so creating it here
+# with the right owner survives the engine block untouched.
+RUN install -d -m 0755 -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.config
+
+# Homebrew. Not cosmetic: OpenClaw filters brew-backed skills OUT of the
+# installable list entirely when it detects a Linux container without brew
+# (its `isContainerEnvironment()` check fires on /.dockerenv, which every
+# clawker container has). It also installs `uv` via brew, so no brew also
+# means no python/uv-backed skills. The failure mode is silent — skills
+# simply do not appear in the Control UI — so brew is ON by default here.
+#
+# Disable with: clawker build --build-arg OPENCLAW_INSTALL_BREW=
+# (costs image size; the tradeoff is those skills going invisible again.)
+#
+# Installed under a dedicated `linuxbrew` user at the DEFAULT prefix.
+# Both details matter: Homebrew only ships bottles (prebuilt binaries) for
+# /home/linuxbrew/.linuxbrew — any other prefix forces source builds,
+# which upstream documents as unsupported and expected to fail for some
+# formulae. The container user joins the linuxbrew group and the tree is
+# made group-writable so `brew install` works unprivileged at runtime.
+ARG OPENCLAW_INSTALL_BREW=1
+RUN set -eu; \
+    if [ -z "${OPENCLAW_INSTALL_BREW}" ]; then \
+      echo "openclaw harness: OPENCLAW_INSTALL_BREW empty — skipping Homebrew (brew-backed skills will be hidden)"; \
+      exit 0; \
+    fi; \
+    id -u linuxbrew >/dev/null 2>&1 || useradd -m -s /bin/bash linuxbrew; \
+    usermod -aG linuxbrew "${USERNAME}"; \
+    install -d -o linuxbrew -g linuxbrew /home/linuxbrew/.linuxbrew; \
+    curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o /tmp/brew-install.sh; \
+    chmod 0755 /tmp/brew-install.sh; \
+    su - linuxbrew -c "NONINTERACTIVE=1 CI=1 /bin/bash /tmp/brew-install.sh"; \
+    rm -f /tmp/brew-install.sh; \
+    [ -x /home/linuxbrew/.linuxbrew/bin/brew ] || { echo "ERROR: brew install failed" >&2; exit 1; }; \
+    [ -e /home/linuxbrew/.linuxbrew/Library ] || \
+      ln -s /home/linuxbrew/.linuxbrew/Homebrew/Library /home/linuxbrew/.linuxbrew/Library; \
+    chmod -R g+rwx /home/linuxbrew
+
+# Mount anchor for the `brew` volume, and nothing else. Volume paths are
+# container-home-relative; brew's prefix is not. Docker resolves this symlink
+# at mount time, so the volume lands on /home/linuxbrew/.linuxbrew and runtime
+# `brew install` survives a container recreate. Nothing reads this path.
+RUN ln -s /home/linuxbrew/.linuxbrew /home/${USERNAME}/.linuxbrew
+
+{{- end}}
+
+{{define "user_after_stacks" -}}
+# State locations. These match the defaults and therefore the declared
+# volumes; set explicitly so the mapping is legible rather than implied.
+#
+# OPENCLAW_STATE_DIR is the variable the runtime reads
+# (`env.OPENCLAW_STATE_DIR || path.join(process.env.HOME, ".openclaw")`).
+# OPENCLAW_CONFIG_DIR is NOT set on purpose: it appears only in upstream's
+# docs and compose files, where it interpolates the HOST side of the bind
+# mount. The application never reads it, so setting it here would be inert.
+ENV OPENCLAW_STATE_DIR=/home/${USERNAME}/.openclaw
+ENV OPENCLAW_WORKSPACE_DIR=/home/${USERNAME}/.openclaw/workspace
+ENV OPENCLAW_GATEWAY_PORT=18789
+
+# Gateway bind is deliberately NOT set. OpenClaw detects the container and
+# defaults to bind=auto (0.0.0.0) so a published port is reachable from the
+# host; forcing loopback here would make `-p 127.0.0.1:18789:18789` silently
+# dead. OPENCLAW_GATEWAY_BIND is not the lever it appears to be — it is a
+# deployment-template variable in upstream's compose and docs, absent from
+# the published package; the runtime reads gateway.bind from config only.
+# Non-loopback binds REQUIRE auth, so supply a token at runtime
+# (agent.env / agent.from_env), never baked into the image:
+#   OPENCLAW_GATEWAY_TOKEN=<secret>
+
+# clawkerd is PID 1 and owns the process lifecycle, so OpenClaw must not
+# respawn itself. OPENCLAW_SUPERVISOR_MODE, which the CLI docs describe for
+# exactly this purpose, appears nowhere in the published package — setting
+# it would be inert, so the respawn switch carries this on its own.
+ENV OPENCLAW_NO_RESPAWN=1
+ENV NODE_ENV=production
+
+# pnpm is OpenClaw's preferred package manager for runtime skill installs,
+# selected by config (skills.install.nodeManager) rather than by env —
+# OPENCLAW_PREFER_PNPM is a build-time flag for upstream's own image build
+# and is not read by the published package. Point pnpm's home at the
+# persisted .local volume so installed skill dependencies survive container
+# recreation; its content-addressed store also dedups across installs,
+# which a flat npm global tree would not.
+ENV PNPM_HOME=/home/${USERNAME}/.local/share/pnpm
+ENV NODE_COMPILE_CACHE=/home/${USERNAME}/.cache/node-compile-cache
+
+ENV HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew
+ENV HOMEBREW_CELLAR=/home/linuxbrew/.linuxbrew/Cellar
+ENV HOMEBREW_REPOSITORY=/home/linuxbrew/.linuxbrew/Homebrew
+
+# Exec-form CMD resolves via the image ENV PATH only — rc files never
+# apply — and runtime-installed skill binaries land in these prefixes.
+# ~/.nvm/current is the stable symlink the install block below creates into
+# nvm's versioned prefix: it puts the user-owned node, npm, and openclaw in
+# front of the node stack's /usr/local floor for the CMD, the healthcheck,
+# and every subprocess the gateway spawns (plugin installs run npm — the
+# user-owned one keeps those writes out of root-owned prefixes).
+ENV PATH=${PNPM_HOME}:/home/${USERNAME}/.nvm/current/bin:/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:${PATH}
+
+# OpenClaw's doctor checks that its state dirs are owner-only; bind mounts
+# and volume defaults land at 0755. The engine's volume block has already
+# created and chowned these, so this runs as the owner.
+RUN mkdir -p ${OPENCLAW_WORKSPACE_DIR} ${PNPM_HOME} \
+             /home/${USERNAME}/.local/bin /home/${USERNAME}/.cache && \
+    chmod 0700 /home/${USERNAME}/.openclaw \
+               /home/${USERNAME}/.config/openclaw \
+               ${OPENCLAW_WORKSPACE_DIR}
+
+# Homebrew's repos are owned by the linuxbrew user while the container
+# user runs brew; git refuses to operate across that ownership boundary
+# without an explicit exception.
+RUN if [ -d /home/linuxbrew/.linuxbrew/Homebrew ]; then \
+      git config --global --add safe.directory /home/linuxbrew/.linuxbrew/Homebrew; \
+    fi
+
+{{- end}}
+
+{{define "user_after_shell_switch" -}}
+# OpenClaw version. Build-only ARG declared directly above its only
+# consumer: BuildKit invalidates the cache at an ARG's DECLARATION line,
+# so placing it here scopes an OpenClaw release bump to this layer alone.
+# Default resolves against the npm registry at template-render time.
+# Override: clawker build --build-arg OPENCLAW_VERSION=<version>
+ARG OPENCLAW_VERSION={{.HarnessVersion}}
+
+# Installed as the container USER through nvm, matching the other harnesses
+# in this bundle — nothing npm-ish runs as root, so no root-owned droppings
+# can land in the user's home (a root npm here bricked runtime plugin
+# installs with EACCES on ~/.npm; the base image sets HOME=/home/<user> for
+# every build step, root ones included). This block runs under zsh, which
+# sources .zshenv, so npm resolves to nvm's user-owned prefix.
+#
+# The exec-form CMD never runs a shell, so nvm's rc-file magic is invisible
+# to it; the `current` symlink gives the versioned nvm prefix a static path
+# that ENV PATH (user_after_stacks) puts in front of /usr/local. node, npm,
+# and openclaw all resolve user-owned from there.
+#
+# NODE_OPTIONS caps heap so the install does not OOM (exit 137) on small
+# hosts; SHARP_IGNORE_GLOBAL_LIBVIPS keeps the image's libvips out of the
+# native build.
+#
+# npm 11.16+ blocks install-time lifecycle scripts by default and only WARNS
+# when it skips them, so a plain `npm install -g` silently drops OpenClaw's
+# postinstall (dist hygiene, plugin-registry migration, a baileys patch) —
+# the same script upstream's own Dockerfile runs explicitly. The allowlist
+# names exactly the packages that need scripts, and --strict-allow-scripts
+# turns the policy from a warning into a hard failure: if a future OpenClaw
+# release pulls in another script-bearing dependency, this build FAILS and
+# names it instead of quietly skipping it. Widening the list is then a
+# deliberate one-line decision, which is the point.
+RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 NODE_OPTIONS=--max-old-space-size=2048 \
+    npm install -g --no-fund --no-audit \
+      --strict-allow-scripts \
+      --allow-scripts openclaw,tree-sitter-bash,protobufjs,@google/genai \
+      "openclaw@${OPENCLAW_VERSION}" && \
+    ln -sfn "$(dirname "$(dirname "$(command -v node)")")" \
+      /home/${USERNAME}/.nvm/current && \
+    /home/${USERNAME}/.nvm/current/bin/openclaw --version
+{{- end}}
+
+{{define "root_before_entrypoint" -}}
+# Liveness only. /healthz answers as soon as the server can serve HTTP;
+# /readyz additionally waits on channels and hooks to settle, which can
+# legitimately take a while on a cold gateway, so it is the wrong probe
+# for "is the process alive".
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["openclaw", "gateway", "health"]
+{{- end}}
+
+{{define "cmd" -}}
+# Bare `gateway` is an alias for `gateway run`. Port and bind come from the
+# ENV/config above rather than flags so they stay overridable without
+# rebuilding the image — a flag here would also win over any gateway.bind
+# the user later sets, which is the opposite of what a generic image wants.
+#
+# The gateway's start guard requires gateway.mode=local in an existing
+# config and exits otherwise ("Missing config. Run `openclaw setup`").
+# A fresh named volume has no config, so a bare unonboarded run dies on
+# first boot — DELIBERATELY. Onboarding is a deployment concern:
+# `agent.post_init` runs `openclaw onboard --non-interactive ...` before
+# this CMD ever starts, satisfying the guard the intended way. A user who
+# instead wants an unonboarded gateway (Control-UI-first setup) opts in at
+# runtime, where the flag stays their call, not the image's:
+#   clawker run ... @:openclaw openclaw gateway --allow-unconfigured
+# Baking that flag here would permanently suppress the guard — which also
+# protects an ONBOARDED deployment against clobbered config — for every
+# container built from this image.
+CMD ["openclaw", "gateway"]
+{{- end}}

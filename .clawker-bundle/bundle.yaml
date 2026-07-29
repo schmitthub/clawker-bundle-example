@@ -1,7 +1,7 @@
 namespace: schmitthub
 name: test-bundle
-version: 0.1.2
-description: Working example clawker bundle — claude, codex, and opencode harnesses plus eight example stacks, to fork from.
+version: 2026.7.1
+description: Working example clawker bundle — claude, codex, opencode, and openclaw harnesses plus eight example stacks, to fork from.
 author: Andrew Schmitt
-repository: https://github.com/schmitthub/clawker-test-bundle
+repository: https://github.com/schmitthub/clawker-bundle-example
 license: MIT

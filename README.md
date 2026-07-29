@@ -1,7 +1,7 @@
-# clawker-test-bundle
+# clawker-bundle-example
 
 A working example [clawker](https://github.com/schmitthub/clawker) bundle —
-fork this repo to build your own. It ships three harnesses and eight
+fork this repo to build your own. It ships four harnesses and eight
 stacks:
 
 | Component | Address | What it does |
@@ -9,12 +9,30 @@ stacks:
 | `harnesses/claude` | `schmitthub.test-bundle.claude` | [Claude Code](https://code.claude.com) via the canonical installer (version resolved from npm `@anthropic-ai/claude-code`). Declares the `node` stack, persists `~/.claude` as a volume, seeds statusline/settings on first boot, stages host `~/.claude` state (settings allowlist, agents, skills, commands, plugin registry with path rewrites), and floors egress at the Anthropic API/OAuth/telemetry domains |
 | `harnesses/codex` | `schmitthub.test-bundle.codex` | [Codex CLI](https://github.com/openai/codex) via the canonical installer (version resolved from GitHub release tags `rust-v*`). Self-contained binary — no stack. Persists `~/.codex` as a volume, stages host global `AGENTS.md` + prompts, and floors egress at the OpenAI API/auth domains with `chatgpt.com` path-scoped to the codex backend |
 | `harnesses/opencode` | `schmitthub.test-bundle.opencode` | [OpenCode](https://opencode.ai) via the canonical installer (version resolved from npm `opencode-ai`). Persists `~/.config/opencode` + `~/.local/share/opencode` as volumes, stages the host's global `AGENTS.md`, and floors egress at `models.dev` + `api.anthropic.com` |
+| `harnesses/openclaw` | `schmitthub.test-bundle.openclaw` | [OpenClaw](https://openclaw.ai) gateway via npm (version resolved from npm `openclaw`). The one **daemon** harness — its CMD is a long-lived service, not an interactive CLI. Installs root-global so the exec-form CMD resolves, bakes Homebrew so brew-backed skills stay visible, persists `~/.openclaw` + `~/.config/openclaw` + `~/.local` + `~/.cache` as volumes, and floors egress at the model providers, the plugin registry, and the package registries runtime skill installs reach for |
 
 The `claude` and `codex` harnesses are patterned on clawker's embedded
 harnesses — complete worked examples of every harness surface (stacks,
 volumes, seeds + assets, staging with `json_keys`/`json_rewrites`,
 path-scoped egress, both npm and github-release version resolvers). The
 `opencode` harness shows the minimal shape.
+
+The `openclaw` harness is the odd one out, and deliberately so: it shows
+what a harness looks like when the thing being harnessed is a **service**
+rather than a CLI you sit in front of. Its CMD never exits, it is reached
+over a published port instead of a terminal, and it carries a `HEALTHCHECK`.
+Run it detached:
+
+```bash
+clawker run --detach -p 127.0.0.1:18789:18789 @:schmitthub.test-bundle.openclaw
+```
+
+It also demonstrates two things worth stealing for any harness whose CMD is
+a daemon. First, exec-form CMD is resolved by `clawkerd` against the image
+`PATH` alone — no shell runs, so `.zshenv` and nvm's user-owned prefix are
+invisible to it; installing root-global is what keeps the binary findable.
+Second, a harness can pre-create a directory in its root block to fix
+ownership of a volume's *parent* before the engine's volume block runs.
 
 The `stacks/` directory ships eight example stacks — `go`, `node`,
 `python`, `rust`, `java`, `ruby`, `cpp`, and `dotnet`, addressed as
@@ -31,8 +49,8 @@ Declare and build:
 
 ```yaml
 bundles:
-  - url: https://github.com/schmitthub/clawker-test-bundle.git
-    ref: v0.1.2
+  - url: https://github.com/schmitthub/clawker-bundle-example.git
+    ref: v2026.7.1
 ```
 
 ```bash

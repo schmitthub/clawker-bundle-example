@@ -1,0 +1,113 @@
+# OpenClaw harness — openclaw.ai gateway, installed from npm.
+#
+# Unlike the other harnesses in this bundle, OpenClaw is not an interactive
+# CLI: it is a long-lived gateway daemon that bridges chat platforms
+# (Discord, Telegram, Slack, ...) to coding agents. The CMD never exits;
+# clawkerd supervises it as PID 1 and the Control UI is reached by
+# publishing the gateway port:
+#
+#   clawker run --detach -p 127.0.0.1:18789:18789 @:openclaw
+#
+# Upstream builds its own image from source in-repo (multi-stage, prunes
+# dev deps). That shape is not expressible as a harness fragment — every
+# block slot renders into the single `final` stage — so this harness
+# installs the published npm package instead. The npm tarball ships the
+# built `dist/` with every channel compiled in, plus an
+# `npm-shrinkwrap.json`: the one lockfile npm publishes AND honors on
+# install, pinning the exact dependency tree upstream tested. pnpm and
+# yarn both ignore it, which is why the install below is npm.
+version:
+  resolver: npm
+  package: openclaw
+
+# OpenClaw is npm-distributed and runs on node. The node stack provisions
+# the root-global LTS install on /usr/local (which the build-time
+# `npm install -g` below consumes) plus user-scope nvm.
+stacks:
+  - node
+
+# Persisted dirs. OpenClaw's docs are explicit that "anything under
+# ~/.openclaw may contain secrets or private data" — auth profiles and MCP
+# OAuth tokens live in SQLite there, not just in named credential files.
+#
+#   config  — ~/.openclaw: openclaw.json, agents/<id>/agent/*.sqlite,
+#             credentials/, workspace/
+#   secrets — ~/.config/openclaw: auth-profile secret dir
+#   local   — ~/.local: where runtime skill installs land (pnpm global,
+#             pip/uv --user, and their bins). OpenClaw installs skill
+#             dependencies on demand from the Control UI, so this must
+#             survive container recreation or every skill dies with the
+#             container.
+#   cache   — ~/.cache: Homebrew's download cache, node compile cache,
+#             and the Playwright browser bundle when it is installed.
+#   brew    — brew's prefix. It lives at /home/linuxbrew/.linuxbrew, outside
+#             the container home, so the template symlinks a home-relative
+#             path to it purely so this entry can name something; Docker
+#             resolves the symlink and mounts the volume on the real prefix.
+#             Without it, every formula installed at runtime is lost on
+#             container recreate.
+volumes:
+  - name: config
+    path: .openclaw
+  - name: secrets
+    path: .config/openclaw
+  - name: local
+    path: .local
+  - name: cache
+    path: .cache
+  - name: brew
+    path: .linuxbrew
+
+# No staging: OpenClaw state is server-side, not host dotfiles. There is
+# nothing on a developer machine to carry in, and credentials should never
+# travel — onboard inside the container.
+
+# Floor = the package managers the harness's own machinery uses, nothing
+# else. OpenClaw is a self-hosted gateway with no destination it cannot
+# FUNCTION without (unlike claude, which is dead without api.anthropic.com)
+# — but its baked-in install machinery reaches package registries on its
+# own: startup migrations npm-install missing bundled plugins before any
+# user choice, and the Control UI's skill installs shell out to npm/pnpm,
+# uv/pip, and the brew this image bakes. Model providers, channels, and
+# search follow from per-deployment choices and belong in the deployment
+# repo's clawker config (`security.firewall`), widened from observed
+# blocks. (Build-time fetches run on the host daemon outside the agent
+# network namespace and never needed rules here.)
+egress:
+  # node — plugin repair + skill installs (npm/pnpm)
+  - dst: registry.npmjs.org
+  # python — uv/pip-backed skills
+  - dst: pypi.org
+  - dst: files.pythonhosted.org
+  # homebrew — formulae metadata + bottles for brew-backed skills
+  - dst: formulae.brew.sh
+  # Bottles come from GitHub Container Registry. Traced live (jq 1.8.2):
+  # ghcr.io itself serves only the API — /token (anonymous pull auth) and
+  # /v2/homebrew/core/<f>/manifests/* (JSON) — while the blob GET answers
+  # 307 to a storage bucket, which is where the bytes actually come from:
+  #   ghcr.io/v2/homebrew/core/jq/blobs/sha256:...
+  #   -> 307 pkg-containers.githubusercontent.com/ghcrblobs16/blobs/...?sp=r&hmac=...
+  # So two hosts, each scoped to what it does in that chain:
+  #
+  # ghcr.io is path-scoped to the homebrew namespace, read-only verbs — a
+  # bare allow would open all of GHCR, where forwarded GitHub credentials
+  # could push blobs to an attacker-readable package (an exfil channel,
+  # not a theoretical). An allow path with no path_default denies every
+  # other path on the host.
+  - dst: ghcr.io
+    path_rules:
+      - path: ~/v2/homebrew/.*
+        action: allow
+        methods: [GET, HEAD]
+      - path: ~/token
+        action: allow
+        methods: [GET]
+  # The bucket host, exact — NOT the .githubusercontent.com wildcard
+  # (raw. and friends stay out). Its URLs are HMAC-signed, short-lived,
+  # and read-only (sp=r), mintable only through the ghcr API scoped
+  # above, so it adds no push surface.
+  - dst: pkg-containers.githubusercontent.com
+    path_rules:
+      - path: ~/ghcrblobs.*
+        action: allow
+        methods: [GET, HEAD]
