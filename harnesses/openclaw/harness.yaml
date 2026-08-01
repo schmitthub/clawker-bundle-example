@@ -30,9 +30,10 @@ stacks:
 # ~/.openclaw may contain secrets or private data" — auth profiles and MCP
 # OAuth tokens live in SQLite there, not just in named credential files.
 #
-#   config  — ~/.openclaw: openclaw.json, agents/<id>/agent/*.sqlite,
-#             credentials/, workspace/
-#   secrets — ~/.config/openclaw: auth-profile secret dir
+#   config  — ~/.openclaw: ALL gateway state — openclaw.json, agents/<id>/
+#             agent/auth-profiles.json + *.sqlite, credentials/,
+#             secrets.json, workspace/. OpenClaw has no XDG config dir;
+#             everything lives under the state dir.
 #   local   — ~/.local: where runtime skill installs land (pnpm global,
 #             pip/uv --user, and their bins). OpenClaw installs skill
 #             dependencies on demand from the Control UI, so this must
@@ -49,8 +50,6 @@ stacks:
 volumes:
   - name: config
     path: .openclaw
-  - name: secrets
-    path: .config/openclaw
   - name: local
     path: .local
   - name: cache
