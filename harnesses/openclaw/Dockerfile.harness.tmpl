@@ -5,15 +5,6 @@
 */}}
 
 {{define "root_after_stacks" -}}
-# Pre-create ~/.config owned by the container user, BEFORE the engine's
-# harness-volume mkdir runs. That block does `mkdir -p <dir> && chown -R
-# <dir>` per declared volume path, so for `.config/openclaw` it chowns the
-# leaf but leaves the `.config` PARENT root-owned. OpenClaw hit exactly
-# this (upstream issue #85968) and pre-creates the parent for the same
-# reason. `mkdir -p` on an existing dir is a no-op, so creating it here
-# with the right owner survives the engine block untouched.
-RUN install -d -m 0755 -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.config
-
 # Homebrew. Not cosmetic: OpenClaw filters brew-backed skills OUT of the
 # installable list entirely when it detects a Linux container without brew
 # (its `isContainerEnvironment()` check fires on /.dockerenv, which every
@@ -114,9 +105,7 @@ ENV PATH=${PNPM_HOME}:/home/${USERNAME}/.nvm/current/bin:/home/${USERNAME}/.loca
 # created and chowned these, so this runs as the owner.
 RUN mkdir -p ${OPENCLAW_WORKSPACE_DIR} ${PNPM_HOME} \
              /home/${USERNAME}/.local/bin /home/${USERNAME}/.cache && \
-    chmod 0700 /home/${USERNAME}/.openclaw \
-               /home/${USERNAME}/.config/openclaw \
-               ${OPENCLAW_WORKSPACE_DIR}
+    chmod 0700 /home/${USERNAME}/.openclaw ${OPENCLAW_WORKSPACE_DIR}
 
 # Homebrew's repos are owned by the linuxbrew user while the container
 # user runs brew; git refuses to operate across that ownership boundary
